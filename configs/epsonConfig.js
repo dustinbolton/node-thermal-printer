@@ -8,13 +8,68 @@ module.exports = {
     CTL_VT     : new Buffer([0x1b, 0x64, 0x04]),      // Vertical tab
 
     // Printer hardware
-    HW_INIT    : new Buffer([0x1b, 0x40]),          // Clear data in buffer and reset modes
-    HW_SELECT  : new Buffer([0x1b, 0x3d, 0x01]),      // Printer select
-    HW_RESET   : new Buffer([0x1b, 0x3f, 0x0a, 0x00]),  // Reset printer hardware
-    BEEP       : new Buffer([0x1b, 0x1e]),              // Sounds built-in buzzer (if equipped)
-    UPSIDE_DOWN_ON  : new Buffer([0x1b,0x7b,0x01]),     // Upside down printing ON (rotated 180 degrees).
-    UPSIDE_DOWN_OFF : new Buffer([0x1b,0x7b,0x00]),     // Upside down printing OFF (default).
-
+    HW_INIT         : new Buffer([0x1b, 0x40]),               // Clear data in buffer and reset modes
+    HW_SELECT       : new Buffer([0x1b, 0x3d, 0x01]),         // Printer select
+    HW_RESET        : new Buffer([0x1b, 0x3f, 0x0a, 0x00]),   // Reset printer hardware
+    BEEP            : new Buffer([0x1b, 0x1e]),               // Sounds built-in buzzer (if equipped)
+    UPSIDE_DOWN_ON  : new Buffer([0x1b,0x7b,0x01]),   // Upside down printing ON (rotated 180 degrees).
+    UPSIDE_DOWN_OFF : new Buffer([0x1b,0x7b,0x00]),   // Upside down printing OFF (default).
+    
+    // Printer Status
+    ASB_ON              : new Buffer([0x1d, 0x61, 0xff]), // Automatic status back ON for all condition changes (drawer pin 3 status, online/offline status, error status, paper sensor status). On status change new status is written to interface for reading.
+    ASB_OFF             : new Buffer([0x1d, 0x61, 0x00]), // Automatic status back OFF.
+    ASB_TEST_MASK       : 0x7c, // Bitmask to test if incoming data is abs data. Basic ASB status can be differentiated by other transmission data by Bit 0, 1, 4, and 7 of the first byte. Process the transmitted data from the printer as ASB status which is consecutive 3 byte if it is "0xx1xx00" [x = 0 or 1].
+    ASB_STATUS_FLAGS        : {
+                              overview: { // byte=0th
+                                   drawerPinHigh: 0x04,
+                                   offline: 0x08,
+                                   cover: 0x20,
+                                   feeding: 0x40,
+                              },
+                              offline: { // byte=1st
+                                   waitingRecovery: 0x01,
+                                   feeding: 0x02,
+                                   recoverable: 0x04, // Eg paper jam or stuck cutter that can be recovered from with human intervention.
+                                   cutter: 0x08, // Could be paper jam or broken cutter circuitry
+                                   unrecoverable: 0x20, // Severe error. Power cycling or repair may be needed.
+                                   temporary: 0x40, // Eg thermal switch triggered due to overheating. Will resume upon cooling.
+                              },
+                              paper: { // byte=2nd
+                                   paperNearEnd: 0x03,
+                                   paperOut: 0x0C,
+                              },
+                              // 3rd byte status info not currently in use.
+                         },
+    STATUS_TEST_MASK    : 0x7e, // Bitmask to test if incoming data is standard status request response.
+    GET_STATUS_OVERVIEW : new Buffer([0x10, 0x04, 0x01]), // Overview of printer status. If problem found use the following get status commands to drill down into more details.
+    GET_STATUS_OFFLINE  : new Buffer([0x10, 0x04, 0x02]), // Offline cause.
+    GET_STATUS_ERROR    : new Buffer([0x10, 0x04, 0x03]), // Error cause.
+    GET_STATUS_PAPER    : new Buffer([0x10, 0x04, 0x04]), // Paper status.
+    GET_STATUS_FLAGS        : {
+                              overview: { // n=1 (GET_STATUS_OVERVIEW)
+                                   drawerPinHigh: 0x04,
+                                   offline: 0x08,
+                                   waitingRecovery: 0x20,
+                                   feeding: 0x40,
+                              },
+                              offline: { // n=2 (GET_STATUS_OFFLINE)
+                                   coverOpen: 0x04,
+                                   feeding: 0x08,
+                                   paperOut: 0x20,
+                                   isError: 0x40,
+                              },
+                              error: { // n=3 (GET_STATUS_ERROR)
+                                   mechanism: 0x04,
+                                   cutter: 0x08, // Could be paper jam or broken cutter circuitry
+                                   unrecoverable: 0x20,
+                                   temporary: 0x40, // Eg thermal switch triggered due to overheating. Will resume upon cooling.
+                              },
+                              paper: { // n=4 (GET_STATUS_PAPER)
+                                   paperNearEnd: 0x04,
+                                   paperEnd: 0x20,
+                              },
+                         },
+    
     // Cash Drawer
     CD_KICK_2  : new Buffer([0x1b, 0x70, 0x00]),      // Sends a pulse to pin 2 []
     CD_KICK_5  : new Buffer([0x1b, 0x70, 0x01]),      // Sends a pulse to pin 5 []

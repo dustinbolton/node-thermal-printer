@@ -1,19 +1,31 @@
 var fs = require('fs'),
     PNG = require('node-png').PNG;
 
-var writeFile = require('write-file-queue')({
-    retries : 1000, 						    // number of write attempts before failing
-    waitTime : 200 					        // number of milliseconds to wait between write attempts
-    //, debug : console.error 			// optionally pass a function to do dump debug information to
+var writeFile = require('write-file-queue-fd')({
+    retries : 1000,                             // number of write attempts before failing
+    waitTime : 200,                             // number of milliseconds to wait between write attempts
+    debug : false//console.error                // optionally pass a function to do dump debug information to
 });
 
 var net = require("net");
+var constants = require('constants');
 var config = undefined;
 var buffer = null;
 var printerConfig;
+var fd = null;
+
+// Reading from printer & status-related vars.
+var statusCommandQueue = []; // Queue of status commands sent to printer awaiting response & processing.
+var statusCommandResponse = []; // Queued response once status commands are all returned to send to statusCommandCb.
+var statusCommandCb = function(){}; // Callback once all status commands are returned from printer.
+var asbChangeCb = function(){}; // Callback when asb is triggered.
+var readStreamQueue = []; // Holds extra bytes if more than expected come in a burst (overflow).
 
 module.exports = {
-  init: function(initConfig){
+  init: function(initConfig, cb){
+     if ( 'function' != typeof cb ) {
+          cb = function(){};
+     }
     if(initConfig.type === 'star'){
       config = require('./configs/starConfig');
     } else {
@@ -26,9 +38,41 @@ module.exports = {
     if(typeof(initConfig.replaceSpecialCharacters) == "undefined") initConfig.replaceSpecialCharacters = true;
 
     printerConfig = initConfig;
+    
+    fs.open( printerConfig.interface, 'rs+', function(err, printerFd) { // after rs+: fs.O_NONBLOCK,
+          if (err) {
+               return cb( 'Error opening `' + printerConfig.interface + '`. Details: `' + err + '`.' );
+          }
+          fd = printerFd; // Save file descriptor for all file access operations.
+          return module.exports._openReadStream( function(err){
+               return cb(err);
+          } );
+         // return cb();
+    });
+    
+    
+  },
+  
+  /* disconnect()
+   *
+   * Disconnect printer.
+   *
+   * @param    function  cb   Callback function upon full printer disconnect/destruction. Calls with params err (null if no error, else string description).
+   */
+  disconnect: function(cb){
+     if ( 'function' != typeof cb ) {
+          cb = function(){};
+     }
+     fs.close( fd, function(err){
+          return cb(err);
+     });
+  },
+  
+  getInterface: function(){
+    return printerConfig.interface;
   },
 
-  execute: function(cb){
+  execute: function(cb,noRetry){
     if(printerConfig.ip){
       var printer = net.connect({
         host : printerConfig.ip,
@@ -38,7 +82,14 @@ module.exports = {
       printer.end();
 
     } else {
-      writeFile(printerConfig.interface , buffer, function (err) {
+     if ( null === fd ) {
+          if ( ( 'undefined' == typeof noRetry ) && ( true !== noRetry ) ) {
+               setTimeout( function(){ module.exports.execute( cb, true ); }, 1000 );
+          } else {
+               return cb( 'execute() called while not connected to printer. Make sure init() was called first.' );
+          }
+     }
+      writeFile( fd, buffer, function (err) {
         if (err) {
           if ("function" == typeof cb) {
             cb("Print failed: " + err);
@@ -294,6 +345,170 @@ module.exports = {
     }
 
   },
+  
+  
+  /* _processStatusFlags()
+   *
+   * Takes buffer status and proccesses into friendly results based on bitmask flags.
+   *
+   */
+  _processStatusFlags: function( chunk, commandName, flagConfig, statusResponse ) {
+          flags = config[ flagConfig ][ commandName ];
+          for (var flagName in flags) {
+               flag = config[ flagConfig ][ commandName ][ flagName ];
+               if ( flag & chunk ) { // Compare first byte in buffer with mask.
+                    statusResponse[ commandName ][ flagName ] = true;
+               } else {
+                    statusResponse[ commandName ][ flagName ] = false;
+               }
+          } // End flag loop.
+          
+          return statusResponse;
+  },
+  
+  
+  _openReadStream: function( cb ){
+     readStream = fs.createReadStream( '', { fd: fd } ); // printerConfig.interface
+     readStream.on('data', function(buffer){
+          //console.log( 'Incoming:' );
+          //console.log( buffer );
+          
+          // Returns new buffer; false if no good.
+          checkBufferLength = function(buffer,desiredBytes){
+               if ( buffer.length > desiredBytes ) {
+                    for (i = desiredBytes; i < buffer.length - desiredBytes; i++) { // Queue up any extra bytes than what was expected.
+                         readStreamQueue.push( buffer[i] );
+                    }
+               } else if ( buffer.length < desiredBytes ) { // See if we have any queued overflow data from last round to prepend.
+                    buffer = readStreamQueue.concat( buffer );
+                    if ( ( buffer.length < desiredBytes ) || ( buffer.length > desiredBytes ) ) { // Still wrong number of bytes. Cannot trust contents.
+                         readStreamQueue = [];
+                         return false;
+                    }
+               }
+               return buffer;
+          };
+          
+          if ( ( config.ASB_TEST_MASK | buffer[0] ) == config.ASB_TEST_MASK ) { // ASB data.
+               
+               if ( false === ( buffer = checkBufferLength( buffer, 4 ) ) ) { // Make sure numbero of bytes is correct. Handle queuing of extra bytes or reject if too short.
+                    return cb( 'Invalid/corrupt buffer data. Not processing this batch.' );
+               }
+               
+               statusResponse = {};
+               for (i = 0; i < 4; i++) { // Look at first 4 bytes.
+                    if ( 0 === i ) {
+                         commandName = 'overview';
+                    } else if ( 1 == i ) {
+                         commandName = 'offline';
+                    } else if ( 2 == i ) {
+                         commandName = 'paper';
+                    } else if ( 3 == i ) { // Last byte not currently in use.
+                         break;
+                    } else {
+                         console.error( 'asb() error: Unexpected ASB byte length. Total buffer length: `' + buffer.length + '`.' );
+                         break;
+                    }
+                    
+                    statusResponse[ commandName ] = {};
+                    statusResponse = module.exports._processStatusFlags( buffer[i], commandName, 'ASB_STATUS_FLAGS', statusResponse );
+               }
+               return asbChangeCb( null, statusResponse );
+               
+          } else if ( ( config.STATUS_TEST_MASK | buffer[0] ) == config.STATUS_TEST_MASK ) { // Requested status data.
+               
+              if ( false === ( buffer = checkBufferLength( buffer, 1 ) ) ) { // Make sure numbero of bytes is correct. Handle queuing of extra bytes or reject if too short.
+                    return cb( 'Invalid/corrupt buffer data. Not processing this batch.' );
+               }
+               
+               commandName = statusCommandQueue.shift();
+               statusCommandResponse[ commandName ] = {};
+               statusCommandResponse = module.exports._processStatusFlags( buffer[0], commandName, 'GET_STATUS_FLAGS', statusCommandResponse );
+               if ( 0 === statusCommandQueue.length ) { // Last item in queue.
+                    return statusCommandCb( null, statusCommandResponse );
+               }
+          }
+          
+          
+     });
+     
+     readStream.on('error', function(err){
+          cb( 'Readstream error: ' + err );
+     });
+     
+     readStream.on('end', function(chunk){
+          console.log( 'Readstream ended.' );
+     });
+     
+     return cb();
+  },
+  
+  
+  /* getStatus()
+   *
+   * Retrieve printer status information by sending status commands and listening for responses.
+   *
+   * @param    cb             [Required]     Required callback function. Callback function called with two parameters: error, statusResults
+   */
+  getStatus: function( cb ){
+     rawResponse = [];
+     statusCommandResponse = []; // Reset response.
+     statusCommandCb = cb;
+     
+     // Build queue of status commands to run.
+     statusQueue = [];
+     for (var commandName in config.GET_STATUS_FLAGS) {
+          statusQueue.push( commandName );
+     }
+     
+     // Send next status request command in queue.
+     processNextQueueCommand = function(){
+          if ( 0 === statusQueue.length ) { // No more commands in queue.
+                return;// cb(null,statusResponse,rawResponse);
+          }
+          commandName = statusQueue.shift(); // Shift off first command from queue.
+          statusCommandQueue.push( commandName );
+          
+          command = config[ 'GET_STATUS_' + commandName.toUpperCase() ];
+          write = new Buffer( command );
+          writeFile( fd, write, function (err) {
+               if (err) {
+                    return cb(err);
+               }
+               processNextQueueCommand();
+          });
+     }; // End processNextQueueCommand.
+     
+     // Begin initial processing of first item in command queue.
+     processNextQueueCommand();
+  }, // End getStatus().
+  
+  
+  /* asb()
+   *
+   * Enable or disable 'automatic status back'. When printer status changed the callback function is called with the new status for live tracking of status changes.
+   *
+   * @param    bool      enabled        Whether or not to enable automatic status back functionality.
+   * @param    function  onChangeCB     Callback function to call on any status change. Calls with three params: error, status
+   */
+  asb: function(enabled,onChangeCB){
+     if (enabled) {
+          command = config.ASB_ON;
+     } else {
+          command = config.ASB_OFF;
+     }
+     
+     write = new Buffer( command );
+     writeFile( fd, write, function (err) {
+          if (err) {
+               return cb(err);
+          }
+          
+          asbChangeCb = onChangeCB;
+     });
+     
+     return;
+  }, // End asb().
 
 
   printQR: function(str){
@@ -304,7 +519,7 @@ module.exports = {
       // [Defined Area] 1 ≤ n ≤ 2
       // [Initial Value] n = 2
       // [Function] Sets the model.
-      // 	• Parameter details
+      //  • Parameter details
       // n | Set Model
       //---+---------------
       // 1 | Model 1
@@ -317,13 +532,13 @@ module.exports = {
       // [Defined Area] 0 ≤ n ≤ 3
       // [Initial Value] n = 0
       // [Function] Sets the mistake correction level.
-      // 	• Parameter details
+      //  • Parameter details
       // n | Correction Level | Mistake Correction Rate (%)
       // --+------------------+----------------------------
-      // 0 | L 								|	7
-      // 1 | M 								| 15
-      // 2 | Q 							  | 25
-      // 3 | H 								| 30
+      // 0 | L                                         |    7
+      // 1 | M                                         | 15
+      // 2 | Q                                      | 25
+      // 3 | H                                         | 30
       append(config.QRCODE_CORRECTION_M);
 
 
@@ -332,10 +547,10 @@ module.exports = {
       // [Defined Area] 1 ≤ n ≤ 8
       // [Initial Value] n = 3
       // [Function] Sets the cell size.
-      //	• Parameter details
-      //	• n: Cell size (Units: Dots)
-      //	• It is recommended that the specification using this command be 3 ≤ n.
-      //	  If n = 1 or 2, check by actually using.
+      //  • Parameter details
+      //  • n: Cell size (Units: Dots)
+      //  • It is recommended that the specification using this command be 3 ≤ n.
+      //    If n = 1 or 2, check by actually using.
       append(config.QRCODE_CELLSIZE_4);
 
 
@@ -349,12 +564,12 @@ module.exports = {
       // 0 ≤ d ≤ 255
       // [Function]
       // Automatically expands the data type of the bar code and sets the data.
-      //	• Parameter details
-      //	• nL + nH x 256: Byte count of bar code data
-      //	• dk: Bar code data (Max. 7089 bytes)
-      //	• When using this command, the printer receives data for the number of bytes (k) specified by nL and nH. The data automatically expands to be set as the qr code data.
-      //	• Indicates the number bytes of data specified by the nL and nH. Bar code data is cleared at this time.
-      //	• The data storage region of this command is shared with the manual setting command so data is updated each time either command is executed.
+      //  • Parameter details
+      //  • nL + nH x 256: Byte count of bar code data
+      //  • dk: Bar code data (Max. 7089 bytes)
+      //  • When using this command, the printer receives data for the number of bytes (k) specified by nL and nH. The data automatically expands to be set as the qr code data.
+      //  • Indicates the number bytes of data specified by the nL and nH. Bar code data is cleared at this time.
+      //  • The data storage region of this command is shared with the manual setting command so data is updated each time either command is executed.
       var s = str.length;
       var lsb = parseInt(s % 256);
       var msb = parseInt(s / 256);
@@ -572,7 +787,7 @@ module.exports = {
 
       // Print raster bit image
       // GS v 0
-      // 1D 76 30	m	xL xH	yL yH d1...dk
+      // 1D 76 30   m    xL xH     yL yH d1...dk
       // xL = (this.width >> 3) & 0xff;
       // xH = 0x00;
       // yL = this.height & 0xff;
@@ -731,7 +946,7 @@ module.exports = {
   },
 
 
-  raw: function(text,cb) {
+  raw: function(text,cb,noRetry) {
     if (printerConfig.ip) {
       var printer = net.connect({
         host: printerConfig.ip,
@@ -741,7 +956,14 @@ module.exports = {
       printer.end();
 
     } else {
-      writeFile(printerConfig.interface, text, function (err) {
+     if ( null === fd ) {
+          if ( ( 'undefined' == typeof noRetry ) && ( true !== noRetry ) ) {
+               setTimeout( function(){ module.exports.raw( text, cb, true ); }, 1000 );
+          } else {
+               return cb( 'raw() called while not connected to printer. Make sure init() was called first.' );
+          }
+     }
+      writeFile( fd, text, function (err) {
         if (err) {
           if ('function' == typeof cb) {
             cb("Print failed: " + err);

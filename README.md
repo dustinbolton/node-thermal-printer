@@ -73,6 +73,13 @@ print.getBuffer();                                  // Returns printer buffer
 print.getWidth();                                   // Get number of characters in one line
 ```
 
+### Printer Status
+printer.getStatus(function(err,status){});               // Retrieve current printer status such as out of paper, cover open status, ready, etc.
+printer.asb(true,function(err,function(err,status){});   // Enabled printer "Auto Status Back" function. Callback called upon enabling & live every time printer status changes with object of status retails.
+
+- IMPORTANT: Status object keys returned by getStatus() and abs() are NOT in the same format as each other. Make sure you note differences in the data returned by each.
+
+
 ### Code 128 settings
 ```js
 printer.code128("Code128", {
@@ -104,6 +111,25 @@ printer.printImage('./assets/olaii-logo-black.png', function(done){
      console.log("Print done");
     }
   });
+});
+
+printer.getStatus( function(err,status){
+  if (err){
+    console.error( "Error getting status" );
+  } else {
+    if ( status.paper.paperOut ) {
+      console.log( "Printer is out of paper!" );
+    }
+  }
+});
+
+printer.asb( true, function( err, status ) {
+	if (err) {
+		console.log( 'Error enabling ASB or processing status.' );
+		return;
+	}
+	console.log( 'Printer status just changed! New status:' );
+	console.log( status );
 });
 
 ```

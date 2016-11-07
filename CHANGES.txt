@@ -1,0 +1,15 @@
+Added getInterface()
+Added command codes for ABS toggling for Epson & Star
+Added command codes for getting current status overview, offline status details, error details, and paper status for Epson & Star
+Added bidirectional ability allowing reading of information from printer such as status (online/offline, ready to print, out of paper, jam, etc)
+Added function for turning ABS on or off with callbacks on status changes
+Added functions for getting various status information
+Added configuration codes for Epson & Star printers for status retrieval and auto status back enabling/disabling
+Added optional callback to init() to catch errors opening printer.
+init() now opens connection to printer immediately and holds open.
+Added disconnect() function to disconnect from printer. Undoes init().
+Modified write-file-queue package to support file descriptors.
+Renamed forked write-file-queue to write-file-queue-fd to prevent accidental overwrite as original package is no longer compatible. Appears fairly abandoned so should be fine.
+On execute() and raw() if fd not set then wait 1sec and try again.
+
+NOTE: asb() and getStatus() not yet available for IP printers.
