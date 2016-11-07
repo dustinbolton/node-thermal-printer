@@ -74,8 +74,10 @@ print.getWidth();                                   // Get number of characters 
 ```
 
 ### Printer Status
+```js
 printer.getStatus(function(err,status){});               // Retrieve current printer status such as out of paper, cover open status, ready, etc.
 printer.asb(true,function(err,function(err,status){});   // Enabled printer "Auto Status Back" function. Callback called upon enabling & live every time printer status changes with object of status retails.
+```
 
 - IMPORTANT: Status object keys returned by getStatus() and abs() are NOT in the same format as each other. Make sure you note differences in the data returned by each.
 
